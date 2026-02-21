@@ -15,6 +15,7 @@ Python 3.6+
 | File | Purpose |
 |------|---------|
 | `generate_data.py` | **Main script** — detects aya markers, maps to surah/verse, outputs `data.csv` |
+| `generate_verse_data.py` | Builds verse bounding boxes from markers; outputs `data_verse.csv` for verse highlighting |
 | `fetch_page_verses.py` | Downloads authoritative page-verse mapping from GitHub |
 | `aya_locator.py` | Original template-matching detector (simpler, used as reference) |
 | `setup_images.sh` | Creates zero-padded symlinks needed by detection scripts |
@@ -55,6 +56,20 @@ This will:
 - Write `../data.csv` with columns: `surah_number, verse_number, page, x, y`
 
 Takes ~5-10 minutes depending on your machine.
+
+### 4. Generate data_verse.csv (verse highlighting)
+
+```bash
+python3 generate_verse_data.py
+```
+
+Or, if you already have `data.csv`, run:
+
+```bash
+python3 generate_verse_data.py --from-csv
+```
+
+This produces `../data_verse.csv` with columns: `page`, `surah_number`, `verse_number`, `x_start`, `y_start`, `x_end`, `y_end` (all coordinates normalized 0–1). Use in your app to draw highlight rectangles: `(x_start * width, y_start * height)` to `(x_end * width, y_end * height)`.
 
 ## How It Works
 
