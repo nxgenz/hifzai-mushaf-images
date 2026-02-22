@@ -13,6 +13,9 @@ Output: data_verse.csv with columns:
   page, surah_number, verse_number, segment, x_start, y_start, x_end, y_end
   - All coordinates normalized 0.0–1.0
   - App usage: highlight_rect = (x_start*w, y_start*h, x_end*w, y_end*h)
+  - Size: consecutive segments with same horizontal bounds are merged; COORD_DECIMALS
+    (default 3) controls precision. For smallest file use COORD_DECIMALS=2. Serving
+    data_verse.csv.gz (gzip) typically reduces transfer size by ~70%.
 
 Prerequisites: same as generate_data.py
   pip install opencv-python numpy
@@ -93,6 +96,12 @@ TOP_FIRST_LINE_Y = LINE_HEIGHT / 2  # 0.0275
 LEFT_EDGE = 0.05
 RIGHT_EDGE = 0.95
 
+# Horizontal padding so highlight covers text (marker positions can sit inside the glyphs)
+HORIZONTAL_PADDING = 0.018  # expand segment left/right by this; clamped to [0,1]
+MIN_SEGMENT_WIDTH = 0.035   # if narrower, expand toward center so highlight is visible
+# Vertical: extend coverage slightly downward (baseline/descenders); don't expand upward to avoid overlap
+VERTICAL_PADDING_DOWN = 0.014  # add to y_end only; clamped to 1 (increased for better coverage)
+
 
 def get_verse_highlight_rows(page_data, verse_index):
     """
@@ -139,6 +148,67 @@ def get_verse_highlight_rows(page_data, verse_index):
     return rows
 
 
+def _apply_width_coverage(x_lo, x_hi):
+    """
+    Expand horizontal bounds so the highlight covers the text properly.
+    Does not change coordinate system: still normalized [0,1], just better coverage.
+    - Add HORIZONTAL_PADDING on both sides (clamped to page).
+    - If segment is very narrow, ensure at least MIN_SEGMENT_WIDTH (centered).
+    """
+    width = x_hi - x_lo
+    # Expand by padding (don't exceed [0, 1])
+    x_lo = max(0.0, x_lo - HORIZONTAL_PADDING)
+    x_hi = min(1.0, x_hi + HORIZONTAL_PADDING)
+    # If still too narrow, expand to minimum width centered on current center
+    new_width = x_hi - x_lo
+    if new_width < MIN_SEGMENT_WIDTH:
+        center = (x_lo + x_hi) / 2
+        half = MIN_SEGMENT_WIDTH / 2
+        x_lo = max(0.0, center - half)
+        x_hi = min(1.0, center + half)
+        # Re-clamp in case we hit edges
+        if x_hi - x_lo < MIN_SEGMENT_WIDTH and x_lo == 0:
+            x_hi = min(1.0, x_lo + MIN_SEGMENT_WIDTH)
+        elif x_hi - x_lo < MIN_SEGMENT_WIDTH and x_hi == 1:
+            x_lo = max(0.0, x_hi - MIN_SEGMENT_WIDTH)
+    return x_lo, x_hi
+
+
+# Merge consecutive segments with same horizontal bounds to reduce CSV size (same verse, same x_start/x_end)
+X_MERGE_TOLERANCE = 0.002
+COORD_DECIMALS = 3  # 2 = smallest file, 3 = good balance, 4 = max precision
+
+
+def _merge_segments(segments):
+    """
+    Merge consecutive segments of the same verse that have the same x_start and x_end.
+    Replaces e.g. 5 full-width rows (same x) with 1 tall rect. Greatly reduces row count.
+    """
+    if not segments:
+        return []
+    merged = []
+    i = 0
+    seg_idx_by_verse = {}
+    while i < len(segments):
+        row = segments[i]
+        surah, verse_num, page, _seg, x_lo, y_lo, x_hi, y_hi = row
+        key = (page, surah, verse_num)
+        j = i + 1
+        while j < len(segments):
+            n = segments[j]
+            if (n[0], n[1], n[2]) != (surah, verse_num, page):
+                break
+            if abs(n[4] - x_lo) > X_MERGE_TOLERANCE or abs(n[6] - x_hi) > X_MERGE_TOLERANCE:
+                break
+            y_hi = n[7]
+            j += 1
+        seg_idx = seg_idx_by_verse.get(key, 0)
+        seg_idx_by_verse[key] = seg_idx + 1
+        merged.append((surah, verse_num, page, seg_idx, x_lo, y_lo, x_hi, y_hi))
+        i = j
+    return merged
+
+
 def verse_boxes_from_app_logic(rows):
     """
     Build data_verse.csv segments using the same logic as the app's getVerseHighlightRows.
@@ -162,14 +232,17 @@ def verse_boxes_from_app_logic(rows):
             for seg_idx, (y_center, start_x, end_x) in enumerate(highlight_rows):
                 y_lo = y_center - LINE_HEIGHT / 2
                 y_hi = y_center + LINE_HEIGHT / 2
+                # Extend coverage slightly downward (baseline/descenders)
+                y_hi = min(1.0, y_hi + VERTICAL_PADDING_DOWN)
                 x_lo = min(start_x, end_x)
                 x_hi = max(start_x, end_x)
+                x_lo, x_hi = _apply_width_coverage(x_lo, x_hi)
                 out.append((
                     surah, verse_num, page, seg_idx,
-                    round(max(0, min(1, x_lo)), 4), round(max(0, min(1, y_lo)), 4),
-                    round(max(0, min(1, x_hi)), 4), round(max(0, min(1, y_hi)), 4)
+                    round(x_lo, COORD_DECIMALS), round(max(0, min(1, y_lo)), COORD_DECIMALS),
+                    round(x_hi, COORD_DECIMALS), round(max(0, min(1, y_hi)), COORD_DECIMALS)
                 ))
-    return out
+    return _merge_segments(out)
 
 
 def load_markers_from_csv(data_csv_path):
